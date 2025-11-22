@@ -14,14 +14,15 @@ load_dotenv()
 app = Flask(__name__, static_folder="static", template_folder="templates")
 
 # ----- OpenRouter client -----
-OPENROUTER_KEY = os.getenv("OPENROUTER_API_KEY")
-if not OPENROUTER_KEY:
-    raise RuntimeError("OPENROUTER_API_KEY is missing in environment variables")
-
 client = OpenAI(
     base_url="https://openrouter.ai/api/v1",
-    api_key=OPENROUTER_KEY,
+    api_key=os.getenv("OPENROUTER_API_KEY"),
+    default_headers={
+        "HTTP-Referer": "https://voice-bot-lr4b.onrender.com",
+        "X-Title": "Voice AI Bot"
+    }
 )
+
 
 # ----- AssemblyAI key -----
 ASSEMBLYAI_KEY = os.getenv("ASSEMBLYAI_API_KEY")
