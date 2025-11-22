@@ -58,23 +58,25 @@ def whisper_stt(audio_bytes: bytes) -> str:
         
 
 # ----------- TTS (StreamElements / Amazon Polly) -----------
+# ----------- TTS (Silicon / natural voices) -----------
 def make_tts_bytes(text: str) -> bytes:
-    """
-    Fast, high-quality and FREE.
-    Voices: Brian, Amy, Joanna, Matthew.
-    """
     if not text.strip():
         return b""
 
-    url = "https://api.streamelements.com/kappa/v2/speech"
-    params = {
-        "voice": "Brian",   # Change if you want another voice
-        "text": text
+    url = "https://api.siliconflow.cn/v1/audio/speech"
+    json_data = {
+        "audio_format": "mp3",
+        "text": text,
+        "voice": "alloy",       # voices: alloy, echo, river, verse, nova
+        "speed": 1.0
     }
 
-    res = requests.get(url, params=params)
+    # API requires NO key
+    res = requests.post(url, json=json_data)
     res.raise_for_status()
+
     return res.content
+
 
 
 # Speak only after sentence ends, or too long
