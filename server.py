@@ -61,25 +61,35 @@ def whisper_stt(audio_bytes):
 
 # ---------------- TTS (gTTS FIXED) ----------------
 # ----------- Free TTS (Navi TTS – no API key needed) -----------
+# ----------- TTS via OpenRouter (FastSpeech2) -----------
 def make_tts_bytes(text: str) -> bytes:
-    if not text.strip():
+    """
+    Use OpenRouter's huggingface/facebook-fastspeech2-en model
+    to turn text into MP3 audio bytes.
+    """
+    text = text.strip()
+    if not text:
         return b""
 
-    url = "https://api.sunoh.ai/api/tts"
-    payload = {
-        "text": text,
-        "voice": "female_en",       # male_en, female_en, anime_girl
-        "audio_format": "mp3"
+    url = "https://openrouter.ai/api/v1/audio/speech"
+    headers = {
+        "Authorization": f"Bearer {os.getenv('OPENROUTER_API_KEY')}",
+        "Content-Type": "application/json",
+    }
+    json_body = {
+        "model": "huggingface/facebook-fastspeech2-en",
+        "input": text,
+        # Optional: "voice" & "format" are model-dependent; this one just uses defaults.
     }
 
     try:
-        res = requests.post(url, json=payload)
-        if res.status_code != 200:
-            print("Navi TTS error:", res.text)
+        resp = requests.post(url, headers=headers, json=json_body)
+        if resp.status_code != 200:
+            print("OpenRouter TTS error:", resp.status_code, resp.text)
             return b""
-        return res.content
+        return resp.content          # MP3 bytes
     except Exception as e:
-        print("TTS HTTP ERROR:", e)
+        print("OpenRouter TTS HTTP error:", e)
         return b""
 
 
