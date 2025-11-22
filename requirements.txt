@@ -4,3 +4,6 @@ requests
 gtts
 python-dotenv
 assemblyai
+soundfile
+numpy
+

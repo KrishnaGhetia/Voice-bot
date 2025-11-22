@@ -5,11 +5,13 @@ import requests
 from dotenv import load_dotenv
 from flask import Flask, render_template, request, Response
 from openai import OpenAI
+from gtts import gTTS
+import tempfile
 
 load_dotenv()
 app = Flask(__name__, static_folder="static", template_folder="templates")
 
-# ---- OpenRouter ----
+# ---------------- OPENROUTER ----------------
 client = OpenAI(
     base_url="https://openrouter.ai/api/v1",
     api_key=os.getenv("OPENROUTER_API_KEY"),
@@ -19,14 +21,14 @@ client = OpenAI(
     },
 )
 
-# ---- AssemblyAI ----
+# ---------------- ASSEMBLY AI ----------------
 ASSEMBLYAI_KEY = os.getenv("ASSEMBLYAI_API_KEY")
 if not ASSEMBLYAI_KEY:
-    raise RuntimeError("ASSEMBLYAI_API_KEY is missing")
+    raise RuntimeError("ASSEMBLYAI_API_KEY missing")
 
 
-# ----------- STT (AssemblyAI) -----------
-def whisper_stt(audio_bytes: bytes) -> str:
+# ---------------- STT ----------------
+def whisper_stt(audio_bytes):
     headers = {"authorization": ASSEMBLYAI_KEY}
 
     upload = requests.post(
@@ -46,50 +48,43 @@ def whisper_stt(audio_bytes: bytes) -> str:
     transcript_id = transcript.json()["id"]
 
     while True:
-        poll = requests.get(
+        res = requests.get(
             f"https://api.assemblyai.com/v2/transcript/{transcript_id}",
-            headers=headers,
+            headers=headers
         ).json()
-        if poll["status"] == "completed":
-            return poll.get("text", "")
-        if poll["status"] == "error":
-            raise RuntimeError(poll.get("error"))
+        if res["status"] == "completed":
+            return res.get("text", "")
+        if res["status"] == "error":
+            raise Exception(res.get("error"))
         time.sleep(1)
-        
 
-# ----------- TTS (StreamElements / Amazon Polly) -----------
-# ----------- TTS (Silicon / natural voices) -----------
+
+# ---------------- TTS (gTTS FIXED) ----------------
 def make_tts_bytes(text: str) -> bytes:
+    """Generate MP3 speech for 1 complete sentence."""
     if not text.strip():
         return b""
 
-    url = "https://api.siliconflow.cn/v1/audio/speech"
-    json_data = {
-        "audio_format": "mp3",
-        "text": text,
-        "voice": "alloy",       # voices: alloy, echo, river, verse, nova
-        "speed": 1.0
-    }
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmp:
+        mp3_path = tmp.name
 
-    # API requires NO key
-    res = requests.post(url, json=json_data)
-    res.raise_for_status()
+    tts = gTTS(text, lang="en")
+    tts.save(mp3_path)
 
-    return res.content
+    with open(mp3_path, "rb") as f:
+        audio = f.read()
+
+    os.remove(mp3_path)
+    return audio
 
 
-
-# Speak only after sentence ends, or too long
-def should_emit_audio(buffer: str, last: str) -> bool:
-    last = last.strip()
-    if last.endswith(('.', '!', '?')):
-        return True
-    if len(buffer) > 260:
-        return True
-    return False
+# Sentence-based trigger
+def sentence_complete(s: str) -> bool:
+    s = s.strip()
+    return s.endswith((".", "!", "?"))
 
 
-# ----------- STREAM -----------    
+# ---------------- STREAM ENDPOINT ----------------
 @app.route("/stream", methods=["POST"])
 def stream():
     audio_bytes = request.data
@@ -97,7 +92,7 @@ def stream():
     try:
         user_text = whisper_stt(audio_bytes)
     except Exception as e:
-        print("STT Error:", e)
+        print("STT ERROR:", e)
         user_text = ""
 
     user_text = user_text.strip() or "Hello?"
@@ -108,58 +103,54 @@ def stream():
         try:
             stream_resp = client.chat.completions.create(
                 model="openai/gpt-oss-20b",
+                stream=True,
                 messages=[
                     {
                         "role": "system",
-                        "content":
-                        "Provide short, clear answers (200–300 words max). "
-                        "Explain in detail ONLY if the user asks."
+                        "content": (
+                            "Give short, clear answers (200–300 words max). "
+                            "Explain in detail ONLY if the user asks."
+                        )
                     },
                     {"role": "user", "content": user_text},
                 ],
-                stream=True,
             )
         except Exception as e:
             print("AI ERROR:", e)
-            yield "data: TEXT::Sorry, there was an error talking to the AI.\n\n"
+            yield "data: TEXT::Sorry, an AI error occurred.\n\n"
             yield "data: DONE\n\n"
             return
 
-        buffer = ""
-        last_token = ""
+        sentence_buffer = ""
 
         for chunk in stream_resp:
             token = ""
             try:
                 token = chunk.choices[0].delta.content or ""
-            except Exception:
+            except:
                 pass
 
             if not token:
                 continue
 
-            last_token = token
-            buffer += token
             yield f"data: TEXT::{token}\n\n"
+            sentence_buffer += token
 
-            if should_emit_audio(buffer, last_token):
+            if sentence_complete(sentence_buffer):
                 try:
-                    audio = make_tts_bytes(buffer)
-                    buffer = ""
+                    audio = make_tts_bytes(sentence_buffer)
+                    sentence_buffer = ""
                     if audio:
                         b64 = base64.b64encode(audio).decode()
                         yield f"data: AUDIO::{b64}\n\n"
                 except Exception as e:
                     print("TTS ERROR:", e)
 
-        if buffer.strip():
-            try:
-                audio = make_tts_bytes(buffer)
-                if audio:
-                    b64 = base64.b64encode(audio).decode()
-                    yield f"data: AUDIO::{b64}\n\n"
-            except Exception as e:
-                print("FINAL TTS ERROR:", e)
+        if sentence_buffer.strip():
+            audio = make_tts_bytes(sentence_buffer)
+            if audio:
+                b64 = base64.b64encode(audio).decode()
+                yield f"data: AUDIO::{b64}\n\n"
 
         yield "data: DONE\n\n"
 
