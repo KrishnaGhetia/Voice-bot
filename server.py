@@ -1,17 +1,13 @@
 import os
 import time
 import base64
-import tempfile
 import requests
 from dotenv import load_dotenv
 from flask import Flask, render_template, request, Response
 from openai import OpenAI
-from gtts import gTTS
-
 
 load_dotenv()
 app = Flask(__name__, static_folder="static", template_folder="templates")
-
 
 # ---- OpenRouter ----
 client = OpenAI(
@@ -29,29 +25,26 @@ if not ASSEMBLYAI_KEY:
     raise RuntimeError("ASSEMBLYAI_API_KEY is missing")
 
 
-# ----------- STT -----------
+# ----------- STT (AssemblyAI) -----------
 def whisper_stt(audio_bytes: bytes) -> str:
     headers = {"authorization": ASSEMBLYAI_KEY}
 
-    # Upload
-    upload_res = requests.post(
+    upload = requests.post(
         "https://api.assemblyai.com/v2/upload",
         headers=headers,
         data=audio_bytes
     )
-    upload_res.raise_for_status()
-    audio_url = upload_res.json()["upload_url"]
+    upload.raise_for_status()
+    audio_url = upload.json()["upload_url"]
 
-    # Transcription job
-    transcript_res = requests.post(
+    transcript = requests.post(
         "https://api.assemblyai.com/v2/transcript",
         headers=headers,
         json={"audio_url": audio_url},
     )
-    transcript_res.raise_for_status()
-    transcript_id = transcript_res.json()["id"]
+    transcript.raise_for_status()
+    transcript_id = transcript.json()["id"]
 
-    # Poll
     while True:
         poll = requests.get(
             f"https://api.assemblyai.com/v2/transcript/{transcript_id}",
@@ -62,33 +55,39 @@ def whisper_stt(audio_bytes: bytes) -> str:
         if poll["status"] == "error":
             raise RuntimeError(poll.get("error"))
         time.sleep(1)
+        
 
-
-# ----------- TTS -----------
+# ----------- TTS (StreamElements / Amazon Polly) -----------
 def make_tts_bytes(text: str) -> bytes:
+    """
+    Fast, high-quality and FREE.
+    Voices: Brian, Amy, Joanna, Matthew.
+    """
     if not text.strip():
         return b""
-    with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
-        path = tmp.name
-    tts = gTTS(text=text, lang="en")
-    tts.save(path)
-    with open(path, "rb") as f:
-        data = f.read()
-    os.remove(path)
-    return data
+
+    url = "https://api.streamelements.com/kappa/v2/speech"
+    params = {
+        "voice": "Brian",   # Change if you want another voice
+        "text": text
+    }
+
+    res = requests.get(url, params=params)
+    res.raise_for_status()
+    return res.content
 
 
-# Speak only **after full sentence** OR if text too long (fallback)
-def should_emit_audio(buffer_text: str, last_token: str) -> bool:
-    last_token = last_token.strip()
-    if last_token.endswith(('.', '!', '?')):
+# Speak only after sentence ends, or too long
+def should_emit_audio(buffer: str, last: str) -> bool:
+    last = last.strip()
+    if last.endswith(('.', '!', '?')):
         return True
-    if len(buffer_text) > 260:  # fallback safety (long reply)
+    if len(buffer) > 260:
         return True
     return False
 
 
-# ----------- STREAM -----------
+# ----------- STREAM -----------    
 @app.route("/stream", methods=["POST"])
 def stream():
     audio_bytes = request.data
@@ -96,7 +95,7 @@ def stream():
     try:
         user_text = whisper_stt(audio_bytes)
     except Exception as e:
-        print("STT error:", e)
+        print("STT Error:", e)
         user_text = ""
 
     user_text = user_text.strip() or "Hello?"
@@ -110,25 +109,21 @@ def stream():
                 messages=[
                     {
                         "role": "system",
-                        "content": (
-                            "Provide short, concise answers — 200 to 300 words max. "
-                            "Explain only in detail if the user asks explicitly."
-                        )
+                        "content":
+                        "Provide short, clear answers (200–300 words max). "
+                        "Explain in detail ONLY if the user asks."
                     },
                     {"role": "user", "content": user_text},
                 ],
                 stream=True,
             )
         except Exception as e:
-            import traceback
-            print("\n\n🔴 OPENROUTER ERROR BEGIN 🔴")
-            traceback.print_exc()
-            print("🔴 OPENROUTER ERROR END 🔴\n\n")
-            yield "data: TEXT::Sorry, I had an error talking to the AI model.\n\n"
+            print("AI ERROR:", e)
+            yield "data: TEXT::Sorry, there was an error talking to the AI.\n\n"
             yield "data: DONE\n\n"
             return
 
-        buffer_for_tts = ""
+        buffer = ""
         last_token = ""
 
         for chunk in stream_resp:
@@ -142,28 +137,27 @@ def stream():
                 continue
 
             last_token = token
-            yield f"data: TEXT::{token}\n\n"  # text streaming
-            buffer_for_tts += token
+            buffer += token
+            yield f"data: TEXT::{token}\n\n"
 
-            if should_emit_audio(buffer_for_tts, last_token):
+            if should_emit_audio(buffer, last_token):
                 try:
-                    tts_bytes = make_tts_bytes(buffer_for_tts)
-                    buffer_for_tts = ""  # Clear before speaking
-                    if tts_bytes:
-                        b64 = base64.b64encode(tts_bytes).decode()
+                    audio = make_tts_bytes(buffer)
+                    buffer = ""
+                    if audio:
+                        b64 = base64.b64encode(audio).decode()
                         yield f"data: AUDIO::{b64}\n\n"
                 except Exception as e:
-                    print("TTS chunk error:", e)
+                    print("TTS ERROR:", e)
 
-        # Flush last part of answer as audio
-        if buffer_for_tts.strip():
+        if buffer.strip():
             try:
-                tts_bytes = make_tts_bytes(buffer_for_tts)
-                if tts_bytes:
-                    b64 = base64.b64encode(tts_bytes).decode()
+                audio = make_tts_bytes(buffer)
+                if audio:
+                    b64 = base64.b64encode(audio).decode()
                     yield f"data: AUDIO::{b64}\n\n"
             except Exception as e:
-                print("TTS final error:", e)
+                print("FINAL TTS ERROR:", e)
 
         yield "data: DONE\n\n"
 
