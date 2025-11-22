@@ -60,22 +60,27 @@ def whisper_stt(audio_bytes):
 
 
 # ---------------- TTS (gTTS FIXED) ----------------
+# ----------- Free TTS (Navi TTS – no API key needed) -----------
 def make_tts_bytes(text: str) -> bytes:
-    """Generate MP3 speech for 1 complete sentence."""
     if not text.strip():
         return b""
 
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmp:
-        mp3_path = tmp.name
+    url = "https://api.sunoh.ai/api/tts"
+    payload = {
+        "text": text,
+        "voice": "female_en",       # male_en, female_en, anime_girl
+        "audio_format": "mp3"
+    }
 
-    tts = gTTS(text, lang="en")
-    tts.save(mp3_path)
-
-    with open(mp3_path, "rb") as f:
-        audio = f.read()
-
-    os.remove(mp3_path)
-    return audio
+    try:
+        res = requests.post(url, json=payload)
+        if res.status_code != 200:
+            print("Navi TTS error:", res.text)
+            return b""
+        return res.content
+    except Exception as e:
+        print("TTS HTTP ERROR:", e)
+        return b""
 
 
 # Sentence-based trigger
