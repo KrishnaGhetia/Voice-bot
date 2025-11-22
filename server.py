@@ -150,7 +150,7 @@ def stream():
 
         try:
             stream_resp = client.chat.completions.create(
-                model="openrouter/gpt-oss-20b",
+                model="openai/gpt-oss-20b",
                 messages=[
                     {
                         "role": "system",
