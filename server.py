@@ -13,7 +13,7 @@ app = Flask(__name__, static_folder="static", template_folder="templates")
 
 client = OpenAI(
     base_url="https://openrouter.ai/api/v1",
-    api_key=os.getenv("OPENROUTER_API_KEY") or os.getenv("OPENAI_API_KEY")
+    api_key=os.getenv("OPENROUTER_API_KEY")
 )
 
 
@@ -105,7 +105,7 @@ def stream():
         yield f"data: TEXT::*User*: {user_text}\n\n"
 
         stream_resp = client.chat.completions.create(
-            model="openai/gpt-oss-20b",
+            model="openrouter/gpt-oss-20b",
             messages=[
                 {
                     "role": "system",
