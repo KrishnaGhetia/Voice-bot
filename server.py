@@ -169,7 +169,13 @@ def stream():
                 stream=True,
             )
         except Exception as e:
-            print("OpenRouter chat error:", e)
+            import traceback
+            print("\n\n🔴 FULL OPENROUTER ERROR BEGIN 🔴")
+            print("Exception type:", type(e).__name__)
+            print("Exception message:", e)
+            traceback.print_exc()
+            print("🔴 FULL OPENROUTER ERROR END 🔴\n\n")
+
             yield "data: TEXT::Sorry, I had an error talking to the AI model.\n\n"
             yield "data: DONE\n\n"
             return
