@@ -1,0 +1,6 @@
+Flask
+openai
+requests
+gtts
+python-dotenv
+assemblyai
