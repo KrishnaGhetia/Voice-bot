@@ -149,13 +149,25 @@ function playQueue() {
     return;
   }
 
-  const audio = new Audio(audioQueue[0]);
-  audio.play().catch(err => console.warn("Autoplay blocked:", err));
+  // Always play FIFO (first in queue)
+  const url = audioQueue[0];
+  const audio = new Audio(url);
+
+  audio.oncanplaythrough = () => {
+    audio.play()
+      .catch(err => console.warn("Autoplay blocked:", err));
+  };
 
   audio.onended = () => {
-    audioQueue.shift();
-    if (!audioQueue.length)
-      document.getElementById("avatar")?.classList.remove("talking");
-    playQueue();
+    audioQueue.shift();          // remove played chunk
+    playQueue();                 // play next ONLY after end
   };
+
+  // Safety timeout (prevent freeze on Render delay)
+  setTimeout(() => {
+    if (!audio.paused) return;
+    audioQueue.shift();
+    playQueue();
+  }, 15000);  // max 15 sec wait per chunk
 }
+
