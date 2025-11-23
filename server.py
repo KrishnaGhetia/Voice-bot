@@ -11,7 +11,7 @@ from gtts import gTTS
 load_dotenv()
 app = Flask(__name__, static_folder="static", template_folder="templates")
 
-# ---- OpenRouter ----
+# ---------------- OPENROUTER ----------------
 client = OpenAI(
     base_url="https://openrouter.ai/api/v1",
     api_key=os.getenv("OPENROUTER_API_KEY"),
@@ -21,70 +21,82 @@ client = OpenAI(
     },
 )
 
-# ---- AssemblyAI ----
+# ---------------- ASSEMBLY AI ----------------
 ASSEMBLYAI_KEY = os.getenv("ASSEMBLYAI_API_KEY")
 if not ASSEMBLYAI_KEY:
-    raise RuntimeError("ASSEMBLYAI_API_KEY is missing")
+    raise RuntimeError("ASSEMBLYAI_API_KEY missing")
 
-STOP_REQUEST = False
 
+# ---- STOP FLAG FOR INTERRUPT ----
+STOP_FLAG = False
 
 @app.post("/stop")
 def stop():
-    global STOP_REQUEST
-    STOP_REQUEST = True
+    global STOP_FLAG
+    STOP_FLAG = True
     return {"status": "ok"}
 
 
-# ---------------- STT ----------------
-def whisper_stt(audio_bytes):
+# ---------------- SPEECH-TO-TEXT ----------------
+def whisper_stt(audio_bytes: bytes) -> str:
     headers = {"authorization": ASSEMBLYAI_KEY}
 
+    # Upload audio
     upload = requests.post(
         "https://api.assemblyai.com/v2/upload",
         headers=headers,
         data=audio_bytes
     )
+    upload.raise_for_status()
     audio_url = upload.json()["upload_url"]
 
+    # Create transcript job
     transcript = requests.post(
         "https://api.assemblyai.com/v2/transcript",
         headers=headers,
         json={"audio_url": audio_url},
     )
+    transcript.raise_for_status()
     transcript_id = transcript.json()["id"]
 
+    # Poll
     while True:
-        poll = requests.get(
+        res = requests.get(
             f"https://api.assemblyai.com/v2/transcript/{transcript_id}",
             headers=headers,
         ).json()
-        if poll["status"] == "completed":
-            return poll.get("text", "")
-        if poll["status"] == "error":
-            return ""
-        time.sleep(0.8)
+        if res["status"] == "completed":
+            return res.get("text", "")
+        if res["status"] == "error":
+            raise RuntimeError(res.get("error"))
+        time.sleep(1)
 
 
-# ---------------- TTS (gTTS) ----------------
-def make_tts_bytes(text: str):
+# ---------------- TEXT-TO-SPEECH ----------------
+def make_tts_bytes(text: str) -> bytes:
     text = text.strip()
     if not text:
         return b""
 
     with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
         path = tmp.name
-    gTTS(text=text, lang="en").save(path)
-    with open(path, "rb") as f:
-        audio = f.read()
-    os.remove(path)
-    return audio
+
+    try:
+        gTTS(text=text, lang="en").save(path)
+        with open(path, "rb") as f:
+            audio_bytes = f.read()
+    finally:
+        try: os.remove(path)
+        except: pass
+
+    return audio_bytes
+
 
 # ---------------- STREAM ----------------
 @app.route("/stream", methods=["POST"])
 def stream():
-    global STOP_REQUEST
-    STOP_REQUEST = False
+    global STOP_FLAG
+    STOP_FLAG = False
 
     audio_bytes = request.data
     try:
@@ -96,32 +108,28 @@ def stream():
 
     def event_stream():
         yield f"data: TEXT::*User*: {user_text}\n\n"
+        time.sleep(0.01)
 
         try:
             resp = client.chat.completions.create(
                 model="openai/gpt-oss-20b",
                 stream=True,
                 messages=[
-                    {
-                        "role": "system",
-                        "content": (
-                            "Give short, clear answers. Max 250 words. "
-                            "Detailed explanation only when user asks."
-                        )
-                    },
+                    {"role": "system",
+                     "content": "Give short clear answers first. Max 250 words."},
                     {"role": "user", "content": user_text},
                 ],
             )
-        except:
-            yield "data: TEXT::AI error.\n\n"
+        except Exception as e:
+            yield "data: TEXT::AI error occurred.\n\n"
             yield "data: DONE\n\n"
             return
 
         buffer = ""
-        sentence_enders = (".", "!", "?")
+        enders = (".", "!", "?")
 
         for chunk in resp:
-            if STOP_REQUEST:
+            if STOP_FLAG:
                 yield "data: DONE\n\n"
                 return
 
@@ -136,35 +144,32 @@ def stream():
 
             yield f"data: TEXT::{token}\n\n"
             buffer += token
+            time.sleep(0.004)
 
-            # Speak only on a complete sentence with enough length
-            if len(buffer) > 35 and buffer.strip().endswith(sentence_enders):
+            if buffer.strip().endswith(enders):
                 speak = buffer.strip()
-                buffer = ""  # reset first
+                buffer = ""
 
-                audio = make_tts_bytes(speak)
-                if audio:
+                try:
+                    audio = make_tts_bytes(speak)
                     b64 = base64.b64encode(audio).decode()
                     yield f"data: AUDIO::{b64}\n\n"
+                except Exception as e:
+                    print("TTS error:", e)
 
-        # leftover end of reply
-        if buffer.strip() and not STOP_REQUEST:
+        if buffer.strip() and not STOP_FLAG:
             audio = make_tts_bytes(buffer)
-            if audio:
-                b64 = base64.b64encode(audio).decode()
-                yield f"data: AUDIO::{b64}\n\n"
+            b64 = base64.b64encode(audio).decode()
+            yield f"data: AUDIO::{b64}\n\n"
 
         yield "data: DONE\n\n"
 
     return Response(
         event_stream(),
         mimetype="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",  # stops buffering on Render
-        },
+        headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"},
     )
+
 
 @app.route("/")
 def index():
@@ -172,4 +177,6 @@ def index():
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+    from eventlet import wsgi
+    import eventlet
+    wsgi.server(eventlet.listen(('0.0.0.0', int(os.environ.get("PORT", 5000)))), app)

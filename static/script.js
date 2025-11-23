@@ -1,74 +1,55 @@
-// ---- DOM elements ----
 const recBtn = document.getElementById("recBtn");
 const stopBtn = document.getElementById("stopBtn");
 const statusText = document.getElementById("status");
 const chatWindow = document.getElementById("chatWindow");
 
 let mediaRecorder;
-let recording = false;
 let chunks = [];
 let reader = null;
 let stopSignal = false;
 let audioQueue = [];
-let currentAudio = null;
-let isSpeaking = false;
+window.isSpeaking = false;
 
-// ---- Start / Stop Recording ----
-recBtn.onclick = async () => (!recording ? startRecording() : stopRecording());
+recBtn.onclick = async () => (!window.recording ? startRecording() : stopRecording());
 stopBtn.onclick = stopEverything;
 
 async function startRecording() {
-  try {
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    mediaRecorder = new MediaRecorder(stream, { mimeType: "audio/webm" });
-  } catch {
-    alert("Microphone blocked");
-    return;
-  }
-
+  const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  mediaRecorder = new MediaRecorder(stream);
   chunks = [];
   mediaRecorder.ondataavailable = e => chunks.push(e.data);
   mediaRecorder.onstop = sendAudio;
   mediaRecorder.start();
-  recording = true;
+  window.recording = true;
 
   recBtn.classList.add("recording");
   statusText.innerText = "Listening…";
-  document.getElementById("waveform")?.style.setProperty("display", "flex");
-
   stopSignal = false;
   stopBtn.style.display = "none";
+
+  fetch("/stop", { method: "POST" });
 }
 
 function stopRecording() {
-  if (mediaRecorder?.state !== "inactive") mediaRecorder.stop();
-  recording = false;
+  mediaRecorder.stop();
+  window.recording = false;
   recBtn.classList.remove("recording");
-  document.getElementById("waveform")?.style.setProperty("display", "none");
   statusText.innerText = "Processing…";
 }
 
-// ---- STOP EVERYTHING ----
 function stopEverything() {
   stopSignal = true;
-
-  fetch("/stop", { method: "POST" }); // notify backend
+  fetch("/stop", { method: "POST" });
 
   if (reader?.cancel) reader.cancel();
   audioQueue = [];
-  isSpeaking = false;
+  window.isSpeaking = false;
 
-  if (currentAudio) {
-    currentAudio.pause();
-    currentAudio = null;
-  }
-
-  document.getElementById("avatar")?.classList.remove("talking");
+  if (window.currentAudio) window.currentAudio.pause();
   stopBtn.style.display = "none";
   statusText.innerText = "Stopped";
 }
 
-// ---- Chat bubble ----
 function addBubble(text, sender = "ai") {
   const div = document.createElement("div");
   div.className = `bubble ${sender}`;
@@ -77,98 +58,57 @@ function addBubble(text, sender = "ai") {
   chatWindow.scrollTop = chatWindow.scrollHeight;
 }
 
-// ---- Send audio to backend ----
 function sendAudio() {
-  const blob = new Blob(chunks, { type: "audio/webm" });
   addBubble("🎤 Processing voice…", "user");
+  const blob = new Blob(chunks, { type: "audio/webm" });
 
-  fetch("/stream", { method: "POST", body: blob }).then(res => {
-    if (!res.body) return;
-
+  fetch("/stream", { method: "POST", body: blob }).then(async res => {
     reader = res.body.getReader();
-    const decoder = new TextDecoder();
-
     addBubble("", "ai");
     let aiBubble = chatWindow.lastChild;
-
     stopBtn.style.display = "block";
-    statusText.innerText = "AI responding…";
-
     audioQueue = [];
 
-    function read() {
-      if (stopSignal) return;
+    const decoder = new TextDecoder();
 
-      reader.read().then(({ done, value }) => {
-        if (done) {
-          stopBtn.style.display = "none";
-          statusText.innerText = "Idle";
-          document.getElementById("avatar")?.classList.remove("talking");
-          return;
+    while (true) {
+      if (stopSignal) return;
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      const text = decoder.decode(value);
+      const lines = text.split("\n\n");
+
+      for (let l of lines) {
+        if (!l.startsWith("data:")) continue;
+        const payload = l.replace("data:", "").trim();
+
+        if (payload.startsWith("TEXT::")) {
+          aiBubble.innerText += payload.replace("TEXT::", "");
+          chatWindow.scrollTop = chatWindow.scrollHeight;
         }
 
-        const text = decoder.decode(value, { stream: true });
-        const events = text.split("\n\n");
-
-        events.forEach(line => {
-          if (!line.startsWith("data:")) return;
-          const payload = line.replace("data:", "").trim();
-
-          // --- TEXT ---
-          if (payload.startsWith("TEXT::")) {
-            const token = payload.replace("TEXT::", "");
-            aiBubble.innerText += token;
-            chatWindow.scrollTop = chatWindow.scrollHeight;
-          }
-
-          // --- AUDIO ---
-          if (payload.startsWith("AUDIO::") && !stopSignal) {
-            const b64 = payload.replace("AUDIO::", "");
-            audioQueue.push(`data:audio/mp3;base64,${b64}`);
-            playQueue(); // FIFO playback
-          }
-
-          // --- DONE ---
-          if (payload === "DONE") {
-            stopBtn.style.display = "none";
-            statusText.innerText = "Idle";
-          }
-        });
-
-        read();
-      }).catch(() => stopEverything());
+        if (payload.startsWith("AUDIO::") && !stopSignal) {
+          const url = "data:audio/mp3;base64," + payload.replace("AUDIO::", "");
+          audioQueue.push(url);
+          playQueue();
+        }
+      }
     }
-
-    read();
   });
 }
 
-// ---- Audio playback FIFO ----
 function playQueue() {
-  if (stopSignal || isSpeaking || !audioQueue.length) {
-    if (!audioQueue.length) {
-      document.getElementById("avatar")?.classList.remove("talking");
-    }
-    return;
-  }
+  if (stopSignal || window.isSpeaking || !audioQueue.length) return;
 
-  isSpeaking = true;
+  window.isSpeaking = true;
   const url = audioQueue.shift();
-  currentAudio = new Audio(url);
+  const audio = new Audio(url);
+  window.currentAudio = audio;
 
-  document.getElementById("avatar")?.classList.add("talking");
-
-  currentAudio.play().catch(() => {});
-
-  currentAudio.onended = () => {
-    isSpeaking = false;
-    currentAudio = null;
-    playQueue();
-  };
-
-  currentAudio.onerror = () => {
-    isSpeaking = false;
-    currentAudio = null;
+  audio.play();
+  audio.onended = () => {
+    window.isSpeaking = false;
     playQueue();
   };
 }
