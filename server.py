@@ -91,7 +91,6 @@ def make_tts_bytes(text: str) -> bytes:
 
 
 # ---------------- STREAM (with STOP support) ----------------
-# ---------------- STREAM ----------------
 @app.route("/stream", methods=["POST"])
 def stream():
     audio_bytes = request.data
@@ -112,42 +111,43 @@ def stream():
                 stream=True,
                 messages=[
                     {"role": "system",
-                     "content": (
-                         "Give short, clear answers first (200–300 words). "
-                         "Continue only if user asks."
-                     )},
+                     "content": "Answer concisely first (max 250 words) unless user asks detail."},
                     {"role": "user", "content": user_text},
                 ],
             )
-        except Exception:
-            yield "data: TEXT::Sorry, AI error occurred.\n\n"
+        except:
+            yield "data: TEXT::AI error.\n\n"
             yield "data: DONE\n\n"
             return
 
-        buffer = ""
-        MIN_TTS_LEN = 60                         # <── avoid 1–2 words playback
-        ENDERS = (".", "!", "?")
+        buffer = ""            # sentence being built
+        sentence_end = (".", "!", "?")
 
         for chunk in resp:
-            token = (chunk.choices[0].delta.content or "") if chunk.choices else ""
+            token = ""
+            try: token = chunk.choices[0].delta.content or ""
+            except: pass
+
             if not token:
                 continue
 
+            # live streaming text
             yield f"data: TEXT::{token}\n\n"
             buffer += token
 
-            # Speak only when:
-            # 1) A sentence ends AND >= MIN_TTS_LEN
-            if buffer.strip().endswith(ENDERS) and len(buffer) >= MIN_TTS_LEN:
-                speak = buffer
-                buffer = ""
+            # send speech only on completed sentence
+            if buffer.strip().endswith(sentence_end):
+                speak_text = buffer.strip()
+                buffer = ""                     # reset BEFORE generating TTS
+                try:
+                    audio = make_tts_bytes(speak_text)
+                    if audio:
+                        b64 = base64.b64encode(audio).decode()
+                        yield f"data: AUDIO::{b64}\n\n"
+                except Exception as e:
+                    print("TTS error:", e)
 
-                audio = make_tts_bytes(speak)
-                if audio:
-                    b64 = base64.b64encode(audio).decode()
-                    yield f"data: AUDIO::{b64}\n\n"
-
-        # Final remaining sentence
+        # leftover small final sentence
         if buffer.strip():
             audio = make_tts_bytes(buffer)
             if audio:
