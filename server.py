@@ -26,6 +26,17 @@ ASSEMBLYAI_KEY = os.getenv("ASSEMBLYAI_API_KEY")
 if not ASSEMBLYAI_KEY:
     raise RuntimeError("ASSEMBLYAI_API_KEY is missing")
 
+# ---- Global STOP flag ----
+STOP_REQUEST = False
+
+
+@app.post("/stop")
+def stop():
+    """Called when user presses STOP button."""
+    global STOP_REQUEST
+    STOP_REQUEST = True
+    return {"status": "ok"}
+
 
 # ---------------- STT ----------------
 def whisper_stt(audio_bytes: bytes) -> str:
@@ -40,7 +51,7 @@ def whisper_stt(audio_bytes: bytes) -> str:
     audio_url = upload.json()["upload_url"]
 
     transcript = requests.post(
-        "https://api.assemblyai.com/v2/transcript",
+        "https://api.assemblyAI.com/v2/transcript",
         headers=headers,
         json={"audio_url": audio_url},
     )
@@ -48,18 +59,18 @@ def whisper_stt(audio_bytes: bytes) -> str:
     transcript_id = transcript.json()["id"]
 
     while True:
-        poll = requests.get(
+        res = requests.get(
             f"https://api.assemblyai.com/v2/transcript/{transcript_id}",
             headers=headers,
         ).json()
-        if poll["status"] == "completed":
-            return poll.get("text", "")
-        if poll["status"] == "error":
-            raise RuntimeError(poll.get("error"))
+        if res["status"] == "completed":
+            return res.get("text", "")
+        if res["status"] == "error":
+            raise RuntimeError(res.get("error"))
         time.sleep(1)
 
 
-# ---------------- TTS (original gTTS working version) ----------------
+# -------------- TTS (gTTS working version) ----------------
 def make_tts_bytes(text: str) -> bytes:
     text = text.strip()
     if not text:
@@ -69,19 +80,17 @@ def make_tts_bytes(text: str) -> bytes:
         path = tmp.name
 
     try:
-        tts = gTTS(text=text, lang="en")
-        tts.save(path)
+        gTTS(text=text, lang="en").save(path)
         with open(path, "rb") as f:
             data = f.read()
     finally:
-        try:
-            os.remove(path)
-        except:
-            pass
+        try: os.remove(path)
+        except: pass
 
     return data
 
 
+# ---------------- STREAM (with STOP support) ----------------
 # ---------------- STREAM ----------------
 @app.route("/stream", methods=["POST"])
 def stream():
@@ -103,40 +112,44 @@ def stream():
                 stream=True,
                 messages=[
                     {"role": "system",
-                     "content": "Give short clear answers first. Max 250 words."},
+                     "content": (
+                         "Give short, clear answers first (200–300 words). "
+                         "Continue only if user asks."
+                     )},
                     {"role": "user", "content": user_text},
                 ],
             )
-        except Exception as e:
-            yield "data: TEXT::AI error occurred.\n\n"
+        except Exception:
+            yield "data: TEXT::Sorry, AI error occurred.\n\n"
             yield "data: DONE\n\n"
             return
 
-        sentence_buffer = ""
-        enders = [".", "!", "?"]
+        buffer = ""
+        MIN_TTS_LEN = 60                         # <── avoid 1–2 words playback
+        ENDERS = (".", "!", "?")
 
         for chunk in resp:
-            token = ""
-            try:
-                token = chunk.choices[0].delta.content or ""
-            except:
-                pass
+            token = (chunk.choices[0].delta.content or "") if chunk.choices else ""
             if not token:
                 continue
 
             yield f"data: TEXT::{token}\n\n"
-            sentence_buffer += token
+            buffer += token
 
-            if len(sentence_buffer) > 30 and sentence_buffer.strip().endswith(tuple(enders)):
-                speak = sentence_buffer
-                sentence_buffer = ""
+            # Speak only when:
+            # 1) A sentence ends AND >= MIN_TTS_LEN
+            if buffer.strip().endswith(ENDERS) and len(buffer) >= MIN_TTS_LEN:
+                speak = buffer
+                buffer = ""
+
                 audio = make_tts_bytes(speak)
                 if audio:
                     b64 = base64.b64encode(audio).decode()
                     yield f"data: AUDIO::{b64}\n\n"
 
-        if sentence_buffer.strip():
-            audio = make_tts_bytes(sentence_buffer)
+        # Final remaining sentence
+        if buffer.strip():
+            audio = make_tts_bytes(buffer)
             if audio:
                 b64 = base64.b64encode(audio).decode()
                 yield f"data: AUDIO::{b64}\n\n"
