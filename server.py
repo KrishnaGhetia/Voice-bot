@@ -95,10 +95,8 @@ def make_tts_bytes(text: str) -> bytes:
 # ---------------- STREAM ----------------
 @app.route("/stream", methods=["POST"])
 def stream():
-    global STOP_FLAG
-    STOP_FLAG = False
-
     audio_bytes = request.data
+
     try:
         user_text = whisper_stt(audio_bytes)
     except:
@@ -108,7 +106,7 @@ def stream():
 
     def event_stream():
         yield f"data: TEXT::*User*: {user_text}\n\n"
-        time.sleep(0.01)
+        full_text = ""
 
         try:
             resp = client.chat.completions.create(
@@ -116,23 +114,16 @@ def stream():
                 stream=True,
                 messages=[
                     {"role": "system",
-                     "content": "Give short clear answers first. Max 250 words."},
+                     "content": "Answer concisely (200–300 words)."},
                     {"role": "user", "content": user_text},
                 ],
             )
-        except Exception as e:
-            yield "data: TEXT::AI error occurred.\n\n"
+        except:
+            yield "data: TEXT::AI error.\n\n"
             yield "data: DONE\n\n"
             return
 
-        buffer = ""
-        enders = (".", "!", "?")
-
         for chunk in resp:
-            if STOP_FLAG:
-                yield "data: DONE\n\n"
-                return
-
             token = ""
             try:
                 token = chunk.choices[0].delta.content or ""
@@ -142,33 +133,18 @@ def stream():
             if not token:
                 continue
 
+            full_text += token
             yield f"data: TEXT::{token}\n\n"
-            buffer += token
-            time.sleep(0.004)
 
-            if buffer.strip().endswith(enders):
-                speak = buffer.strip()
-                buffer = ""
-
-                try:
-                    audio = make_tts_bytes(speak)
-                    b64 = base64.b64encode(audio).decode()
-                    yield f"data: AUDIO::{b64}\n\n"
-                except Exception as e:
-                    print("TTS error:", e)
-
-        if buffer.strip() and not STOP_FLAG:
-            audio = make_tts_bytes(buffer)
+        # 🔥 TTS after entire response
+        audio = make_tts_bytes(full_text)
+        if audio:
             b64 = base64.b64encode(audio).decode()
             yield f"data: AUDIO::{b64}\n\n"
 
         yield "data: DONE\n\n"
 
-    return Response(
-        event_stream(),
-        mimetype="text/event-stream",
-        headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"},
-    )
+    return Response(event_stream(), mimetype="text/event-stream")
 
 
 @app.route("/")
