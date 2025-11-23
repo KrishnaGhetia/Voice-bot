@@ -4,6 +4,5 @@ requests==2.32.3
 gTTS==2.5.3
 openai==1.53.0
 Werkzeug==3.0.3
-gevent==24.2.1
-greenlet==3.1.1
 gunicorn==23.0.0
+eventlet==0.36.1

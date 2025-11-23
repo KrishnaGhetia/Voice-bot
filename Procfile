@@ -1,1 +1,1 @@
-web: gunicorn --worker-class gevent --timeout 600 server:app
+web: gunicorn --worker-class eventlet --timeout 600 server:app
