@@ -79,7 +79,7 @@ def make_tts_bytes(text: str) -> bytes:
     json_body = {
         "model": "huggingface/facebook-fastspeech2-en",
         "input": text,
-        # Optional: "voice" & "format" are model-dependent; this one just uses defaults.
+        # Optional: "voice" & "format" are model-dependent; this one just uses.
     }
 
     try:
