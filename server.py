@@ -26,20 +26,18 @@ ASSEMBLYAI_KEY = os.getenv("ASSEMBLYAI_API_KEY")
 if not ASSEMBLYAI_KEY:
     raise RuntimeError("ASSEMBLYAI_API_KEY is missing")
 
-# ---- Global STOP flag ----
 STOP_REQUEST = False
 
 
 @app.post("/stop")
 def stop():
-    """Called when user presses STOP button."""
     global STOP_REQUEST
     STOP_REQUEST = True
     return {"status": "ok"}
 
 
 # ---------------- STT ----------------
-def whisper_stt(audio_bytes: bytes) -> str:
+def whisper_stt(audio_bytes):
     headers = {"authorization": ASSEMBLYAI_KEY}
 
     upload = requests.post(
@@ -47,7 +45,6 @@ def whisper_stt(audio_bytes: bytes) -> str:
         headers=headers,
         data=audio_bytes
     )
-    upload.raise_for_status()
     audio_url = upload.json()["upload_url"]
 
     transcript = requests.post(
@@ -55,63 +52,50 @@ def whisper_stt(audio_bytes: bytes) -> str:
         headers=headers,
         json={"audio_url": audio_url},
     )
-    transcript.raise_for_status()
     transcript_id = transcript.json()["id"]
 
     while True:
-        res = requests.get(
+        poll = requests.get(
             f"https://api.assemblyai.com/v2/transcript/{transcript_id}",
             headers=headers,
         ).json()
-        if res["status"] == "completed":
-            return res.get("text", "")
-        if res["status"] == "error":
-            raise RuntimeError(res.get("error"))
-        time.sleep(1)
+        if poll["status"] == "completed":
+            return poll.get("text", "")
+        if poll["status"] == "error":
+            return ""
+        time.sleep(0.8)
 
 
-# -------------- TTS (gTTS working version) ----------------
-def make_tts_bytes(text: str) -> bytes:
+# ---------------- TTS (gTTS) ----------------
+def make_tts_bytes(text: str):
     text = text.strip()
     if not text:
         return b""
 
     with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
         path = tmp.name
+    gTTS(text=text, lang="en").save(path)
+    with open(path, "rb") as f:
+        audio = f.read()
+    os.remove(path)
+    return audio
 
-    try:
-        gTTS(text=text, lang="en").save(path)
-        with open(path, "rb") as f:
-            data = f.read()
-    finally:
-        try:
-            os.remove(path)
-        except:
-            pass
-
-    return data
-
-
-# ---------------- STREAM (with STOP support) ----------------
+# ---------------- STREAM ----------------
 @app.route("/stream", methods=["POST"])
 def stream():
     global STOP_REQUEST
-    STOP_REQUEST = False  # reset for each new request
+    STOP_REQUEST = False
 
     audio_bytes = request.data
-
     try:
         user_text = whisper_stt(audio_bytes)
-    except Exception as e:
-        print("STT error:", e)
+    except:
         user_text = ""
 
     user_text = user_text.strip() or "Hello?"
 
     def event_stream():
         yield f"data: TEXT::*User*: {user_text}\n\n"
-        # tiny pause so Render doesn't batch the very first event
-        time.sleep(0.01)
 
         try:
             resp = client.chat.completions.create(
@@ -121,21 +105,20 @@ def stream():
                     {
                         "role": "system",
                         "content": (
-                            "Answer concisely first (max 250 words). "
-                            "Explain more only if the user asks."
-                        ),
+                            "Give short, clear answers. Max 250 words. "
+                            "Detailed explanation only when user asks."
+                        )
                     },
                     {"role": "user", "content": user_text},
                 ],
             )
-        except Exception as e:
-            print("AI error:", e)
+        except:
             yield "data: TEXT::AI error.\n\n"
             yield "data: DONE\n\n"
             return
 
         buffer = ""
-        sentence_end = (".", "!", "?")
+        sentence_enders = (".", "!", "?")
 
         for chunk in resp:
             if STOP_REQUEST:
@@ -145,56 +128,43 @@ def stream():
             token = ""
             try:
                 token = chunk.choices[0].delta.content or ""
-            except Exception:
+            except:
                 pass
 
             if not token:
                 continue
 
-            # stream text
             yield f"data: TEXT::{token}\n\n"
             buffer += token
-            # small delay to reduce Render batching
-            time.sleep(0.005)
 
-            # sentence finished? send TTS
-            if buffer.strip().endswith(sentence_end):
-                speak_text = buffer.strip()
-                buffer = ""  # reset BEFORE TTS
+            # Speak only on a complete sentence with enough length
+            if len(buffer) > 35 and buffer.strip().endswith(sentence_enders):
+                speak = buffer.strip()
+                buffer = ""  # reset first
 
-                try:
-                    audio = make_tts_bytes(speak_text)
-                    if audio:
-                        b64 = base64.b64encode(audio).decode()
-                        yield f"data: AUDIO::{b64}\n\n"
-                        time.sleep(0.01)
-                except Exception as e:
-                    print("TTS error:", e)
-
-        # leftover text at end
-        if buffer.strip() and not STOP_REQUEST:
-            try:
-                audio = make_tts_bytes(buffer)
+                audio = make_tts_bytes(speak)
                 if audio:
                     b64 = base64.b64encode(audio).decode()
                     yield f"data: AUDIO::{b64}\n\n"
-                    time.sleep(0.01)
-            except Exception as e:
-                print("Final TTS error:", e)
+
+        # leftover end of reply
+        if buffer.strip() and not STOP_REQUEST:
+            audio = make_tts_bytes(buffer)
+            if audio:
+                b64 = base64.b64encode(audio).decode()
+                yield f"data: AUDIO::{b64}\n\n"
 
         yield "data: DONE\n\n"
 
-    # SSE response with buffering disabled for Render
     return Response(
         event_stream(),
         mimetype="text/event-stream",
         headers={
-            "X-Accel-Buffering": "no",   # ask proxy not to buffer
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",  # stops buffering on Render
         },
     )
-
 
 @app.route("/")
 def index():

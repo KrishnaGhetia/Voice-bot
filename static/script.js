@@ -10,7 +10,8 @@ let chunks = [];
 let reader = null;
 let stopSignal = false;
 let audioQueue = [];
-window.isSpeaking = false; // prevent overlap
+let currentAudio = null;
+let isSpeaking = false;
 
 // ---- Start / Stop Recording ----
 recBtn.onclick = async () => (!recording ? startRecording() : stopRecording());
@@ -39,7 +40,6 @@ async function startRecording() {
   stopBtn.style.display = "none";
 }
 
-// stop recording only — does NOT stop AI
 function stopRecording() {
   if (mediaRecorder?.state !== "inactive") mediaRecorder.stop();
   recording = false;
@@ -48,16 +48,19 @@ function stopRecording() {
   statusText.innerText = "Processing…";
 }
 
-// ---- STOP EVERYTHING (AI + speech) ----
+// ---- STOP EVERYTHING ----
 function stopEverything() {
   stopSignal = true;
 
+  fetch("/stop", { method: "POST" }); // notify backend
+
   if (reader?.cancel) reader.cancel();
   audioQueue = [];
-  window.isSpeaking = false;
+  isSpeaking = false;
 
-  if (window.currentAudio) {
-    window.currentAudio.pause();
+  if (currentAudio) {
+    currentAudio.pause();
+    currentAudio = null;
   }
 
   document.getElementById("avatar")?.classList.remove("talking");
@@ -65,7 +68,7 @@ function stopEverything() {
   statusText.innerText = "Stopped";
 }
 
-// ---- Add chat bubbles ----
+// ---- Chat bubble ----
 function addBubble(text, sender = "ai") {
   const div = document.createElement("div");
   div.className = `bubble ${sender}`;
@@ -88,9 +91,10 @@ function sendAudio() {
     addBubble("", "ai");
     let aiBubble = chatWindow.lastChild;
 
-    audioQueue = [];
     stopBtn.style.display = "block";
     statusText.innerText = "AI responding…";
+
+    audioQueue = [];
 
     function read() {
       if (stopSignal) return;
@@ -110,21 +114,21 @@ function sendAudio() {
           if (!line.startsWith("data:")) return;
           const payload = line.replace("data:", "").trim();
 
-          // ---- Text token ----
+          // --- TEXT ---
           if (payload.startsWith("TEXT::")) {
             const token = payload.replace("TEXT::", "");
             aiBubble.innerText += token;
             chatWindow.scrollTop = chatWindow.scrollHeight;
           }
 
-          // ---- Audio chunk ----
+          // --- AUDIO ---
           if (payload.startsWith("AUDIO::") && !stopSignal) {
             const b64 = payload.replace("AUDIO::", "");
-            const url = `data:audio/mp3;base64,${b64}`;
-            audioQueue.push(url);
-            playQueue();
+            audioQueue.push(`data:audio/mp3;base64,${b64}`);
+            playQueue(); // FIFO playback
           }
 
+          // --- DONE ---
           if (payload === "DONE") {
             stopBtn.style.display = "none";
             statusText.innerText = "Idle";
@@ -139,31 +143,32 @@ function sendAudio() {
   });
 }
 
-// ---- Queue-safe Audio playback ----
+// ---- Audio playback FIFO ----
 function playQueue() {
-  if (stopSignal) return;
-  if (window.isSpeaking) return;
-  if (!audioQueue.length) {
-    document.getElementById("avatar")?.classList.remove("talking");
+  if (stopSignal || isSpeaking || !audioQueue.length) {
+    if (!audioQueue.length) {
+      document.getElementById("avatar")?.classList.remove("talking");
+    }
     return;
   }
 
-  window.isSpeaking = true;
+  isSpeaking = true;
   const url = audioQueue.shift();
-  const audio = new Audio(url);
-  window.currentAudio = audio;
+  currentAudio = new Audio(url);
 
   document.getElementById("avatar")?.classList.add("talking");
 
-  audio.play().catch(() => {});
+  currentAudio.play().catch(() => {});
 
-  audio.onended = () => {
-    window.isSpeaking = false;
-    playQueue(); // play next only after previous ended
+  currentAudio.onended = () => {
+    isSpeaking = false;
+    currentAudio = null;
+    playQueue();
   };
 
-  audio.onerror = () => {
-    window.isSpeaking = false;
+  currentAudio.onerror = () => {
+    isSpeaking = false;
+    currentAudio = null;
     playQueue();
   };
 }
