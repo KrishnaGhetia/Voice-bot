@@ -6,4 +6,4 @@ python-dotenv
 assemblyai
 soundfile
 numpy
-
+gevent
