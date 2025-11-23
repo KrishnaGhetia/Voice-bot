@@ -3,5 +3,4 @@ requests
 python-dotenv
 gtts
 openai>=1.37.0
-eventlet==0.36.1
 gunicorn
